@@ -72,6 +72,11 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
   border-radius:10px; padding:12px; font-size:14px; font-weight:600; text-align:left;
 }
 .theme-opt.active{background:var(--accent); border-color:var(--accent); color:#04141f;}
+.perf-opt{
+  background:rgba(255,255,255,0.04); border:1px solid var(--panel-border); color:var(--text);
+  border-radius:10px; padding:12px; font-size:14px; font-weight:600; text-align:left;
+}
+.perf-opt.active{background:var(--accent); border-color:var(--accent); color:#04141f;}
 .settings-hint{color:var(--text-dim); font-size:12px; margin-top:12px;}
 
 /* ============ Shared top bar ============ */
@@ -92,6 +97,8 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
 .chip .dot{width:8px;height:8px;border-radius:50%;background:var(--green);}
 .battery-chip.low{color:var(--amber);}
 .battery-chip.critical{color:var(--red);}
+.gps-chip{font-size:12px; padding:6px 10px;}
+.gps-chip.phone{color:var(--amber); border-color:var(--amber);}
 .clock-chip{font-variant-numeric:tabular-nums; color:var(--text-dim); font-weight:600; font-size:15px;}
 .home-btn{
   width:40px; height:40px; border-radius:12px; background:var(--panel); border:1px solid var(--panel-border);
@@ -102,6 +109,14 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
 #map, #map2{position:absolute; inset:0; background:#0e0e10;}
 
 .searchwrap{position:absolute; top:78px; left:18px; z-index:1000; display:flex; gap:8px;}
+.guidance-bar{
+  position:absolute; top:78px; left:18px; z-index:1000; display:none; align-items:center; gap:14px;
+  background:var(--panel); border:1px solid var(--panel-border); border-radius:16px; padding:14px 20px;
+  backdrop-filter:blur(6px);
+}
+.guidance-icon{font-size:28px; flex-shrink:0;}
+.guidance-dist{font-size:20px; font-weight:700;}
+.guidance-text{color:var(--text-dim); font-size:14px; margin-top:2px;}
 .searchbox{
   flex:1; background:var(--panel); border:1px solid var(--panel-border);
   border-radius:16px; padding:14px 18px; font-size:17px; color:var(--text);
@@ -244,6 +259,13 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
         <button class="theme-opt" data-theme="dark">Тёмная</button>
       </div>
       <div class="settings-hint">Авто: светлая с 7:00, тёмная с 19:00</div>
+
+      <div class="settings-row-title" style="margin-top:18px;">Графика</div>
+      <div class="theme-opts">
+        <button class="perf-opt" data-perf="full">Полная (3D, наклон камеры)</button>
+        <button class="perf-opt" data-perf="lite">Упрощённая (плоская карта, без 3D)</button>
+      </div>
+      <div class="settings-hint">Если карта тормозит на слабом железе — включи упрощённую</div>
     </div>
   </div>
 </div>
@@ -255,13 +277,15 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
     <button class="home-btn" data-goto="home">⌂</button>
     <div style="display:flex; gap:10px;">
       <div class="chip battery-chip" id="battery-chip-nav"><span class="dot"></span><span class="battery-text-nav">-- %</span></div>
+      <div class="chip gps-chip" id="gps-chip-nav" title="Источник GPS">📍авто</div>
       <div class="chip clock-chip" id="clock-nav">--:--</div>
     </div>
   </div>
-  <div class="searchwrap" style="right:18px;">
+  <div class="searchwrap" id="searchwrap-nav" style="right:18px;">
     <input class="searchbox" id="searchbox-nav" type="text" placeholder="Куда едем?" autocomplete="off" />
   </div>
   <div class="results" id="results-nav" style="right:18px;"></div>
+  <div class="guidance-bar" id="guidance-bar-nav" style="right:18px;"></div>
   <button class="traffic-btn" id="traffic-btn-nav">🚦</button>
   <button class="locate-btn" id="locate-btn-nav">◎</button>
   <div class="routebar" id="routebar-nav">
@@ -303,13 +327,15 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
     <button class="home-btn" data-goto="home">⌂</button>
     <div style="display:flex; gap:10px;">
       <div class="chip battery-chip" id="battery-chip-both"><span class="dot"></span><span class="battery-text-both">-- %</span></div>
+      <div class="chip gps-chip" id="gps-chip-both" title="Источник GPS">📍авто</div>
       <div class="chip clock-chip" id="clock-both">--:--</div>
     </div>
   </div>
-  <div class="searchwrap" style="right:328px;">
+  <div class="searchwrap" id="searchwrap-both" style="right:328px;">
     <input class="searchbox" id="searchbox-both" type="text" placeholder="Куда едем?" autocomplete="off" />
   </div>
   <div class="results" id="results-both" style="right:328px;"></div>
+  <div class="guidance-bar" id="guidance-bar-both" style="right:328px;"></div>
   <button class="traffic-btn" id="traffic-btn-both">🚦</button>
   <button class="locate-btn" id="locate-btn-both">◎</button>
   <div class="routebar" id="routebar-both">

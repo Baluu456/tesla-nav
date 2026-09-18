@@ -10,7 +10,7 @@ const CONFIG = {
   DESTINATION_POLL_MS: 5000,
   SPOTIFY_PHONE_NAME: null, // например "David's iPhone"
 
-  OSRM_URL: "https://router.project-osrm.org/route/v1/driving", // больше не используется для основного маршрута — оставлен как аварийный запасной вариант
+  OSRM_URL: "https://router.project-osrm.org/route/v1/driving", // используется как запасная оценка для сравнения с TomTom
 
   // TomTom — используется и для слоя пробок, и для расчёта маршрута с учётом живого трафика
   TOMTOM_API_KEY: "bCBwNBFLEb8BnlowlbVkpO8YwS2hn222",
@@ -293,6 +293,23 @@ function createNavController(viewKey, mapElId, els) {
       els.routeEta.textContent = mins < 60 ? `${mins} мин` : `${Math.floor(mins/60)} ч ${mins%60} мин`;
       els.routeDist.textContent = delayMin > 0 ? `${km} км · +${delayMin} мин в пробках` : `${km} км`;
       els.routebar.style.display = 'flex';
+
+      // для сравнения — параллельно спрашиваем OSRM (другой источник данных, без TomTom),
+      // чтобы наглядно видеть, насколько расходятся оценки на реальных дорогах Грузии
+      if (els.routeCompare) {
+        els.routeCompare.textContent = 'OSRM: …';
+        fetch(`${CONFIG.OSRM_URL}/${start.lng},${start.lat};${destLon},${destLat}?overview=false`)
+          .then(r => r.json())
+          .then(d => {
+            if (d.routes && d.routes[0]) {
+              const osrmMin = Math.round(d.routes[0].duration / 60);
+              els.routeCompare.textContent = `для сравнения — OSRM: ${osrmMin} мин`;
+            } else {
+              els.routeCompare.textContent = '';
+            }
+          })
+          .catch(() => { els.routeCompare.textContent = ''; });
+      }
     } catch (e) {
       console.error('routing failed', e);
       alert('Не удалось построить маршрут — проверь ключ TomTom и соединение');
@@ -305,6 +322,7 @@ function createNavController(viewKey, mapElId, els) {
     state.hasRoute = false;
     state.lastRouteGeojson = null;
     els.routebar.style.display = 'none';
+    if (els.routeCompare) els.routeCompare.textContent = '';
   });
 
   // "Поехали" — переходим из общего обзора маршрута обратно в наклонённый режим слежения за собой
@@ -356,6 +374,7 @@ navInstances.nav = createNavController('nav', 'map', {
   routebar: document.getElementById('routebar-nav'),
   routeEta: document.getElementById('route-eta-nav'),
   routeDist: document.getElementById('route-dist-nav'),
+  routeCompare: document.getElementById('route-compare-nav'),
   routeCancel: document.getElementById('route-cancel-nav'),
   routeStart: document.getElementById('route-start-nav'),
 });
@@ -368,6 +387,7 @@ navInstances.both = createNavController('both', 'map2', {
   routebar: document.getElementById('routebar-both'),
   routeEta: document.getElementById('route-eta-both'),
   routeDist: document.getElementById('route-dist-both'),
+  routeCompare: document.getElementById('route-compare-both'),
   routeCancel: document.getElementById('route-cancel-both'),
   routeStart: document.getElementById('route-start-both'),
 });

@@ -47,6 +47,33 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
 #home-clock{font-size:44px; font-weight:700; font-variant-numeric:tabular-nums; margin-bottom:6px;}
 #home-battery{color:var(--text-dim); font-size:15px; margin-top:-20px;}
 
+/* ---- settings ---- */
+#settings-btn{
+  position:absolute; top:18px; right:18px; z-index:1000;
+  width:44px; height:44px; border-radius:12px;
+  background:var(--panel); border:1px solid var(--panel-border); color:var(--text-dim);
+  font-size:20px; display:flex; align-items:center; justify-content:center;
+}
+#settings-overlay{
+  position:absolute; inset:0; z-index:1600; background:rgba(0,0,0,0.6);
+  display:none; align-items:center; justify-content:center;
+}
+#settings-overlay.show{display:flex;}
+#settings-panel{
+  width:320px; background:var(--panel); border:1px solid var(--panel-border); border-radius:18px;
+  padding:20px; backdrop-filter:blur(10px);
+}
+.settings-hdr{display:flex; align-items:center; justify-content:space-between; font-size:16px; font-weight:700; margin-bottom:16px;}
+.settings-hdr button{background:rgba(255,255,255,0.06); border:1px solid var(--panel-border); color:var(--text); border-radius:10px; width:32px; height:32px;}
+.settings-row-title{font-size:13px; color:var(--text-dim); margin-bottom:8px;}
+.theme-opts{display:flex; flex-direction:column; gap:8px;}
+.theme-opt{
+  background:rgba(255,255,255,0.04); border:1px solid var(--panel-border); color:var(--text);
+  border-radius:10px; padding:12px; font-size:14px; font-weight:600; text-align:left;
+}
+.theme-opt.active{background:var(--accent); border-color:var(--accent); color:#04141f;}
+.settings-hint{color:var(--text-dim); font-size:12px; margin-top:12px;}
+
 /* ============ Shared top bar ============ */
 .topbar{
   position:absolute; top:0; left:0; right:0; height:64px;
@@ -184,6 +211,7 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
 
 <!-- ================= HOME SCREEN ================= -->
 <div class="view" id="view-home">
+  <button id="settings-btn" title="Настройки">⚙</button>
   <div id="home-clock">--:--</div>
   <div id="home-battery">Заряд: -- %</div>
   <div id="home-title">Выбери режим</div>
@@ -204,6 +232,19 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
       <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="8.5" width="18" height="9" rx="4" stroke="#ff5c7a" stroke-width="1.6"/><path d="M7.5 11v3.5M5.75 12.75h3.5" stroke="#ff5c7a" stroke-width="1.6" stroke-linecap="round"/><circle cx="16" cy="11.5" r="1" fill="#ff5c7a"/><circle cx="18" cy="13.5" r="1" fill="#ff5c7a"/></svg>
       <div class="label">ND Games</div>
     </button>
+  </div>
+
+  <div id="settings-overlay">
+    <div id="settings-panel">
+      <div class="settings-hdr"><span>Настройки</span><button id="settings-close">✕</button></div>
+      <div class="settings-row-title">Тема карты</div>
+      <div class="theme-opts">
+        <button class="theme-opt" data-theme="auto">Авто (день/ночь)</button>
+        <button class="theme-opt" data-theme="light">Светлая</button>
+        <button class="theme-opt" data-theme="dark">Тёмная</button>
+      </div>
+      <div class="settings-hint">Авто: светлая с 7:00, тёмная с 19:00</div>
+    </div>
   </div>
 </div>
 

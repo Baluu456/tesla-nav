@@ -272,6 +272,14 @@ function createNavController(viewKey, mapElId, els) {
     els.routebar.style.display = 'none';
   });
 
+  // "Поехали" — переходим из общего обзора маршрута обратно в наклонённый режим слежения за собой
+  els.routeStart.addEventListener('click', () => {
+    state.followMode = true;
+    if (state.carMarker) {
+      map.easeTo({ center: state.carMarker.getLngLat(), zoom: 17.5, pitch: 60, bearing: state.heading, duration: 800 });
+    }
+  });
+
   return { map, state, routeTo, doSearch };
 }
 
@@ -284,6 +292,7 @@ navInstances.nav = createNavController('nav', 'map', {
   routeEta: document.getElementById('route-eta-nav'),
   routeDist: document.getElementById('route-dist-nav'),
   routeCancel: document.getElementById('route-cancel-nav'),
+  routeStart: document.getElementById('route-start-nav'),
 });
 
 navInstances.both = createNavController('both', 'map2', {
@@ -295,6 +304,7 @@ navInstances.both = createNavController('both', 'map2', {
   routeEta: document.getElementById('route-eta-both'),
   routeDist: document.getElementById('route-dist-both'),
   routeCancel: document.getElementById('route-cancel-both'),
+  routeStart: document.getElementById('route-start-both'),
 });
 
 /* =========================================================

@@ -13,7 +13,7 @@ const CONFIG = {
   OSRM_URL: "https://router.project-osrm.org/route/v1/driving",
 
   // Бесплатный ключ на developer.tomtom.com — нужен только для слоя пробок
-  TOMTOM_API_KEY: "bCBwNBFLEb8BnlowlbVkpO8YwS2hn222",
+  TOMTOM_API_KEY: null,
 
   // Ссылка на портал ND Games
   NDGAMES_URL: "https://ndgames.ge",
@@ -82,34 +82,114 @@ setInterval(pollBattery, CONFIG.BATTERY_POLL_MS);
 const navInstances = {};
 
 function createNavController(viewKey, mapElId, els) {
-  const map = L.map(mapElId, { zoomControl: false, attributionControl: true }).setView(CONFIG.START_CENTER, CONFIG.START_ZOOM);
+  const map = L.map(mapElId, {
+    zoomControl: false, attributionControl: true,
+    rotate: true, rotateControl: false, touchRotate: false, shiftKeyRotate: false
+  }).setView(CONFIG.START_CENTER, CONFIG.START_ZOOM);
   document.getElementById(mapElId).classList.add('dark-tiles');
+
+  // отдельный "слой" для пробок — чтобы инверсия тёмной темы (filter на .leaflet-tile-pane)
+  // не портила цвета TomTom-подсветки дорог
+  map.createPane('trafficPane');
+  map.getPane('trafficPane').style.zIndex = 450;
+  map.getPane('trafficPane').style.pointerEvents = 'none';
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
 
+  // стрелка вместо точки — показывает направление движения, вращается на лету
   const carIcon = L.divIcon({
     className: '',
-    html: '<div style="width:18px;height:18px;border-radius:50%;background:#3ea6ff;border:3px solid white;box-shadow:0 0 0 4px rgba(62,166,255,0.25)"></div>',
-    iconSize: [18,18], iconAnchor:[9,9]
+    html: '<div class="car-arrow" style="width:26px;height:26px;transition:transform 0.15s linear;">' +
+      '<svg viewBox="0 0 24 24" width="26" height="26">' +
+      '<path d="M12 2L19 21L12 17L5 21Z" fill="#3ea6ff" stroke="white" stroke-width="1.4" stroke-linejoin="round"/>' +
+      '</svg></div>',
+    iconSize: [26,26], iconAnchor:[13,13]
   });
 
-  const state = { carMarker: null, followMode: true, routeLine: null, trafficLayer: null, map };
+  const state = { carMarker: null, followMode: true, routeLine: null, trafficLayer: null, map, heading: 0, lastFix: null };
+
+  function bearing(lat1, lon1, lat2, lon2) {
+    const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
+    const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+    const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+  function distanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000, toRad = d => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+
+  // плавно едем от старой точки к новой (~700мс), а не скачем — и доворачиваем стрелку
+  function animateCarTo(lat, lng, targetHeading, durationMs) {
+    const marker = state.carMarker;
+    const from = marker.getLatLng();
+    const fromHeading = state.heading;
+    let deltaHeading = ((targetHeading - fromHeading + 540) % 360) - 180; // кратчайший поворот
+    const start = performance.now();
+
+    function step(now) {
+      const t = Math.min((now - start) / durationMs, 1);
+      const curLat = from.lat + (lat - from.lat) * t;
+      const curLng = from.lng + (lng - from.lng) * t;
+      marker.setLatLng([curLat, curLng]);
+
+      const el = marker.getElement();
+      const mapCanRotate = typeof map.setBearing === 'function';
+      const currentAngle = fromHeading + deltaHeading * t;
+      if (el) {
+        const arrow = el.querySelector('.car-arrow');
+        // если карта сама умеет поворачиваться — стрелка всегда смотрит "вверх" (это уже и есть направление движения),
+        // иначе поворачиваем саму стрелку поверх неподвижной карты
+        if (arrow) arrow.style.transform = `rotate(${mapCanRotate ? 0 : currentAngle}deg)`;
+      }
+      if (mapCanRotate && state.followMode) map.setBearing(currentAngle);
+      if (state.followMode) map.panTo([curLat, curLng], { animate: false });
+
+      if (t < 1) requestAnimationFrame(step);
+      else state.heading = targetHeading;
+    }
+    requestAnimationFrame(step);
+  }
 
   if ('geolocation' in navigator) {
     navigator.geolocation.watchPosition(pos => {
-      const { latitude, longitude } = pos.coords;
-      if (!state.carMarker) state.carMarker = L.marker([latitude, longitude], { icon: carIcon }).addTo(map);
-      else state.carMarker.setLatLng([latitude, longitude]);
-      if (state.followMode) map.panTo([latitude, longitude], { animate: true });
-    }, err => console.warn('geolocation error', err), { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
+      const { latitude, longitude, heading, speed } = pos.coords;
+      const now = Date.now();
+
+      if (!state.carMarker) {
+        state.carMarker = L.marker([latitude, longitude], { icon: carIcon }).addTo(map);
+        state.lastFix = { lat: latitude, lng: longitude, t: now };
+        if (state.followMode) map.setView([latitude, longitude], 17);
+        return;
+      }
+
+      // берём курс от GPS-чипа, если он его отдаёт и машина реально едет;
+      // иначе считаем сами по смещению между засечками (и не дёргаем стрелку, если стоим на месте)
+      let targetHeading = state.heading;
+      const movedMeters = state.lastFix ? distanceMeters(state.lastFix.lat, state.lastFix.lng, latitude, longitude) : 0;
+      if (typeof heading === 'number' && !isNaN(heading) && (speed || 0) > 0.5) {
+        targetHeading = heading;
+      } else if (movedMeters > 3 && state.lastFix) {
+        targetHeading = bearing(state.lastFix.lat, state.lastFix.lng, latitude, longitude);
+      }
+
+      const dt = state.lastFix ? Math.min(Math.max(now - state.lastFix.t, 400), 2000) : 800;
+      animateCarTo(latitude, longitude, targetHeading, dt);
+      state.lastFix = { lat: latitude, lng: longitude, t: now };
+    }, err => console.warn('geolocation error', err), { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
   }
 
   map.on('dragstart', () => { state.followMode = false; });
   els.locateBtn.addEventListener('click', () => {
     state.followMode = true;
-    if (state.carMarker) map.panTo(state.carMarker.getLatLng());
+    if (state.carMarker) {
+      map.setView(state.carMarker.getLatLng(), Math.max(map.getZoom(), 17), { animate: true });
+      if (typeof map.setBearing === 'function') map.setBearing(state.heading);
+    }
   });
 
   // трафик от TomTom (реальные пробки — обычные тайлы OSM их не показывают)
@@ -122,7 +202,7 @@ function createNavController(viewKey, mapElId, els) {
     } else {
       state.trafficLayer = L.tileLayer(
         `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${CONFIG.TOMTOM_API_KEY}`,
-        { maxZoom: 19, opacity: 0.85 }
+        { maxZoom: 19, opacity: 0.9, pane: 'trafficPane' }
       ).addTo(map);
       els.trafficBtn.classList.add('active');
     }
@@ -176,8 +256,9 @@ function createNavController(viewKey, mapElId, els) {
       if (state.routeLine) map.removeLayer(state.routeLine);
       const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
       state.routeLine = L.polyline(coords, { color: '#3ea6ff', weight: 6, opacity: 0.9 }).addTo(map);
-      map.fitBounds(state.routeLine.getBounds(), { padding: [60, 60] });
       state.followMode = false;
+      if (typeof map.setBearing === 'function') map.setBearing(0); // общий обзор маршрута всегда "север сверху"
+      map.fitBounds(state.routeLine.getBounds(), { padding: [60, 60] });
 
       const mins = Math.round(route.duration / 60);
       const km = (route.distance / 1000).toFixed(1);

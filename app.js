@@ -114,6 +114,53 @@ function updateThemeButtons() {
 // раз в 5 минут перепроверяем — вдруг наступило 7:00 или 19:00, пока страница открыта
 setInterval(() => { if (getThemeMode() === 'auto') applyThemeToAllMaps(); }, 5 * 60 * 1000);
 
+/* =========================================================
+   УПРОЩЁННЫЙ РЕЖИМ — для слабого железа (Intel Atom, MCU2):
+   без наклона камеры и без объёмных 3D-зданий (это отдельная,
+   ощутимая нагрузка на GPU сама по себе, не только наклон)
+   ========================================================= */
+const PERF_KEY = 'teslaNavPerfMode'; // 'full' | 'lite'
+function getPerfMode() { return localStorage.getItem(PERF_KEY) || 'full'; }
+function setPerfMode(mode) { localStorage.setItem(PERF_KEY, mode); Object.values(navInstances).forEach(i => i && i.applyPerf()); updatePerfButtons(); }
+function followPitch() { return getPerfMode() === 'lite' ? 0 : 60; }
+function updatePerfButtons() {
+  const mode = getPerfMode();
+  document.querySelectorAll('.perf-opt').forEach(b => b.classList.toggle('active', b.dataset.perf === mode));
+}
+// убирает/возвращает объёмные здания (fill-extrusion слои) — работает для любого стиля,
+// не завязано на конкретные названия слоёв
+function toggleBuildingExtrusion(map, hide) {
+  if (!map.isStyleLoaded()) { map.once('idle', () => toggleBuildingExtrusion(map, hide)); return; }
+  (map.getStyle().layers || []).forEach(l => {
+    if (l.type === 'fill-extrusion') map.setLayoutProperty(l.id, 'visibility', hide ? 'none' : 'visible');
+  });
+}
+
+// минималистичный вид для тёмной темы (по образцу референса): только тонкие линии дорог
+// на чёрном фоне — убираем заливки (парки/вода/здания-плоские) и подписи/иконки POI
+function declutterDarkMap(map) {
+  if (!map.isStyleLoaded()) { map.once('idle', () => declutterDarkMap(map)); return; }
+  const ownLayers = ['route-layer', 'traffic-layer']; // наши собственные слои — их не трогаем
+  (map.getStyle().layers || []).forEach(l => {
+    if (ownLayers.includes(l.id)) return;
+    if (l.type === 'fill' || l.type === 'symbol') {
+      map.setLayoutProperty(l.id, 'visibility', 'none');
+    }
+    if (l.type === 'background') {
+      try { map.setPaintProperty(l.id, 'background-color', '#000000'); } catch (e) {}
+    }
+    if (l.type === 'line') {
+      try { map.setPaintProperty(l.id, 'line-color', '#8a93a3'); } catch (e) {}
+    }
+  });
+}
+function restoreFullMap(map) {
+  if (!map.isStyleLoaded()) { map.once('idle', () => restoreFullMap(map)); return; }
+  (map.getStyle().layers || []).forEach(l => {
+    if (l.type === 'fill' || l.type === 'symbol') map.setLayoutProperty(l.id, 'visibility', 'visible');
+  });
+}
+
 function createNavController(viewKey, mapElId, els) {
   const map = new maplibregl.Map({
     container: mapElId,
@@ -150,43 +197,85 @@ function createNavController(viewKey, mapElId, els) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   }
 
+  // общая обработка новой позиции — неважно, пришла она от GPS машины или от телефона
+  function handlePosition(latitude, longitude, heading, speed) {
+    const now = Date.now();
+
+    if (!state.carMarker) {
+      state.carMarker = new maplibregl.Marker({ element: carEl }).setLngLat([longitude, latitude]).addTo(map);
+      state.lastFix = { lat: latitude, lng: longitude, t: now };
+      whenReady(() => { if (state.followMode) map.jumpTo({ center: [longitude, latitude], zoom: 17.5, pitch: followPitch() }); });
+      return;
+    }
+
+    let targetHeading = state.heading;
+    const movedMeters = state.lastFix ? distanceMeters(state.lastFix.lat, state.lastFix.lng, latitude, longitude) : 0;
+    if (typeof heading === 'number' && !isNaN(heading) && (speed || 0) > 0.5) {
+      targetHeading = heading;
+    } else if (movedMeters > 3 && state.lastFix) {
+      targetHeading = bearingCalc(state.lastFix.lat, state.lastFix.lng, latitude, longitude);
+    }
+
+    state.carMarker.setLngLat([longitude, latitude]);
+    state.heading = targetHeading;
+
+    const dt = state.lastFix ? Math.min(Math.max(now - state.lastFix.t, 400), 2000) : 800;
+    if (state.followMode) {
+      map.easeTo({ center: [longitude, latitude], bearing: targetHeading, pitch: followPitch(), zoom: Math.max(map.getZoom(), 17), duration: dt, easing: t => t });
+    }
+    state.lastFix = { lat: latitude, lng: longitude, t: now };
+    updateGuidance();
+  }
+
+  // ЗАПАСНОЙ ИСТОЧНИК — координаты с телефона (см. gps.html), опрашиваем только
+  // если свой GPS машины (браузер Tesla) не сработал вообще
+  let phonePollTimer = null;
+  function startPhoneGpsFallback(reason) {
+    if (phonePollTimer) return; // уже включено
+    console.warn('Переключаюсь на GPS телефона:', reason);
+    state.gpsSource = 'phone';
+    if (els.gpsChip) { els.gpsChip.textContent = '📍телефон'; els.gpsChip.classList.add('phone'); }
+    phonePollTimer = setInterval(async () => {
+      try {
+        const res = await fetch('/api/gps');
+        const data = await res.json();
+        if (data.position) {
+          const p = data.position;
+          handlePosition(p.lat, p.lon, p.heading, p.speed);
+        }
+      } catch (e) { /* сервер недоступен — просто ждём следующего опроса */ }
+    }, 2000);
+  }
+
+  state.gpsSource = 'car';
+  let gotAnyCarFix = false;
+
   if ('geolocation' in navigator) {
     navigator.geolocation.watchPosition(pos => {
+      gotAnyCarFix = true;
+      if (phonePollTimer) {
+        clearInterval(phonePollTimer); phonePollTimer = null; state.gpsSource = 'car';
+        if (els.gpsChip) { els.gpsChip.textContent = '📍авто'; els.gpsChip.classList.remove('phone'); }
+      }
       const { latitude, longitude, heading, speed } = pos.coords;
-      const now = Date.now();
+      handlePosition(latitude, longitude, heading, speed);
+    }, err => {
+      console.warn('geolocation error (GPS машины)', err);
+      startPhoneGpsFallback('ошибка geolocation: ' + err.message);
+    }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
 
-      if (!state.carMarker) {
-        state.carMarker = new maplibregl.Marker({ element: carEl }).setLngLat([longitude, latitude]).addTo(map);
-        state.lastFix = { lat: latitude, lng: longitude, t: now };
-        whenReady(() => { if (state.followMode) map.jumpTo({ center: [longitude, latitude], zoom: 17.5, pitch: 60 }); });
-        return;
-      }
-
-      let targetHeading = state.heading;
-      const movedMeters = state.lastFix ? distanceMeters(state.lastFix.lat, state.lastFix.lng, latitude, longitude) : 0;
-      if (typeof heading === 'number' && !isNaN(heading) && (speed || 0) > 0.5) {
-        targetHeading = heading;
-      } else if (movedMeters > 3 && state.lastFix) {
-        targetHeading = bearingCalc(state.lastFix.lat, state.lastFix.lng, latitude, longitude);
-      }
-
-      state.carMarker.setLngLat([longitude, latitude]);
-      state.heading = targetHeading;
-
-      const dt = state.lastFix ? Math.min(Math.max(now - state.lastFix.t, 400), 2000) : 800;
-      if (state.followMode) {
-        // easeTo сам плавно анимирует центр/поворот/наклон/зум — ручной requestAnimationFrame не нужен
-        map.easeTo({ center: [longitude, latitude], bearing: targetHeading, pitch: 60, zoom: Math.max(map.getZoom(), 17), duration: dt, easing: t => t });
-      }
-      state.lastFix = { lat: latitude, lng: longitude, t: now };
-    }, err => console.warn('geolocation error', err), { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
+    // если за 7 секунд машина вообще ни разу не отдала координаты — тоже переключаемся,
+    // не дожидаясь официальной ошибки (некоторые браузеры её просто не шлют)
+    setTimeout(() => { if (!gotAnyCarFix) startPhoneGpsFallback('нет ответа от GPS машины за 7 сек'); }, 7000);
+  } else {
+    startPhoneGpsFallback('geolocation не поддерживается браузером');
   }
 
   map.on('dragstart', () => { state.followMode = false; });
   els.locateBtn.addEventListener('click', () => {
     state.followMode = true;
     if (state.carMarker) {
-      map.easeTo({ center: state.carMarker.getLngLat(), zoom: Math.max(map.getZoom(), 17), pitch: 60, bearing: state.heading, duration: 600 });
+      map.easeTo({ center: state.carMarker.getLngLat(), zoom: Math.max(map.getZoom(), 17), pitch: followPitch(), bearing: state.heading, duration: 600 });
     }
   });
 
@@ -256,13 +345,22 @@ function createNavController(viewKey, mapElId, els) {
     if (!CONFIG.TOMTOM_API_KEY) { alert('Нужен TOMTOM_API_KEY для построения маршрута'); return; }
     const start = state.carMarker ? state.carMarker.getLngLat() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
     const url = `https://api.tomtom.com/routing/1/calculateRoute/${start.lat},${start.lng}:${destLat},${destLon}/json` +
-      `?key=${CONFIG.TOMTOM_API_KEY}&traffic=true&travelMode=car`;
+      `?key=${CONFIG.TOMTOM_API_KEY}&traffic=true&travelMode=car&instructionsType=text&language=ru-RU`;
     try {
       const res = await fetch(url);
       const data = await res.json();
       if (!data.routes || !data.routes.length) return;
       const route = data.routes[0];
       const coords = route.legs.flatMap(leg => leg.points.map(p => [p.longitude, p.latitude]));
+
+      // пошаговые манёвры — и расстояние вдоль маршрута до каждой точки координат,
+      // чтобы на лету понимать, где мы сейчас и какая подсказка следующая
+      state.instructions = (route.guidance && route.guidance.instructions) || [];
+      state.routeCoords = coords;
+      state.routeCumDist = [0];
+      for (let i = 1; i < coords.length; i++) {
+        state.routeCumDist.push(state.routeCumDist[i-1] + distanceMeters(coords[i-1][1], coords[i-1][0], coords[i][1], coords[i][0]));
+      }
 
       const geojson = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} };
       state.lastRouteGeojson = geojson;
@@ -321,18 +419,59 @@ function createNavController(viewKey, mapElId, els) {
     if (map.getSource && map.getSource('route-src')) map.removeSource('route-src');
     state.hasRoute = false;
     state.lastRouteGeojson = null;
+    state.instructions = [];
+    state.routeCoords = null;
+    state.routeCumDist = null;
     els.routebar.style.display = 'none';
     if (els.routeCompare) els.routeCompare.textContent = '';
+    if (els.guidanceBar) els.guidanceBar.style.display = 'none';
+    if (els.searchwrap) els.searchwrap.style.display = '';
   });
 
-  // "Поехали" — переходим из общего обзора маршрута обратно в наклонённый режим слежения за собой
+  // "Поехали" — переходим из общего обзора маршрута обратно в наклонённый режим слежения за собой,
+  // прячем поиск и показываем полосу с пошаговыми подсказками вместо него
   els.routeStart.addEventListener('click', () => {
     state.followMode = true;
     els.routeStart.style.display = 'none'; // навигация уже началась — повторно жать нечего
+    if (els.searchwrap) els.searchwrap.style.display = 'none';
+    if (els.guidanceBar) els.guidanceBar.style.display = 'flex';
     if (state.carMarker) {
-      map.easeTo({ center: state.carMarker.getLngLat(), zoom: 17.5, pitch: 60, bearing: state.heading, duration: 800 });
+      map.easeTo({ center: state.carMarker.getLngLat(), zoom: 17.5, pitch: followPitch(), bearing: state.heading, duration: 800 });
     }
   });
+
+  // иконка манёвра по коду от TomTom — простые стрелки, без лишней графики
+  const MANEUVER_ICONS = {
+    TURN_LEFT: '⬅', SHARP_LEFT: '⬅', BEAR_LEFT: '↖', KEEP_LEFT: '↖',
+    TURN_RIGHT: '➡', SHARP_RIGHT: '➡', BEAR_RIGHT: '↗', KEEP_RIGHT: '↗',
+    STRAIGHT: '⬆', CONTINUE: '⬆',
+    ROUNDABOUT_LEFT: '🔄', ROUNDABOUT_RIGHT: '🔄', ROUNDABOUT_CROSS: '🔄',
+    ARRIVE: '🏁', ARRIVE_LEFT: '🏁', ARRIVE_RIGHT: '🏁',
+  };
+  function formatDist(m) { return m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1)} км`; }
+
+  // обновить полосу с подсказкой — какой манёвр следующий и сколько до него метров
+  function updateGuidance() {
+    if (!els.guidanceBar || !state.hasRoute || !state.routeCoords || !state.carMarker) return;
+    const pos = state.carMarker.getLngLat();
+
+    // ближайшая точка маршрута к текущей позиции → расстояние, пройденное вдоль маршрута
+    let nearestIdx = 0, best = Infinity;
+    for (let i = 0; i < state.routeCoords.length; i++) {
+      const d = distanceMeters(pos.lat, pos.lng, state.routeCoords[i][1], state.routeCoords[i][0]);
+      if (d < best) { best = d; nearestIdx = i; }
+    }
+    const distAlong = state.routeCumDist[nearestIdx];
+
+    const next = state.instructions.find(instr => instr.routeOffsetInMeters >= distAlong);
+    if (!next) { els.guidanceBar.style.display = 'none'; return; }
+
+    const icon = MANEUVER_ICONS[next.maneuver] || '⬆';
+    const remain = Math.max(0, Math.round(next.routeOffsetInMeters - distAlong));
+    els.guidanceBar.innerHTML =
+      `<span class="guidance-icon">${icon}</span>` +
+      `<div><div class="guidance-dist">${formatDist(remain)}</div><div class="guidance-text">${next.message || ''}</div></div>`;
+  }
 
   // смена темы (день/ночь) — MapLibre при setStyle стирает все наши источники/слои,
   // поэтому после загрузки новой темы переигрываем трафик и маршрут заново
@@ -360,16 +499,26 @@ function createNavController(viewKey, mapElId, els) {
           paint: { 'line-color': '#3ea6ff', 'line-width': 6, 'line-opacity': 0.9 }
         });
       }
+      applyPerf(); // новый стиль снова включает здания по умолчанию — применяем режим заново
     });
   }
 
-  return { map, state, routeTo, doSearch, setTheme };
+  // применить текущий режим графики (полная/упрощённая) к зданиям на карте
+  function applyPerf() {
+    toggleBuildingExtrusion(map, getPerfMode() === 'lite');
+    if (state.currentStyleUrl === CONFIG.MAP_STYLE_DARK) declutterDarkMap(map);
+    else restoreFullMap(map);
+  }
+  map.on('load', applyPerf);
+
+  return { map, state, routeTo, doSearch, setTheme, applyPerf };
 }
 
 navInstances.nav = createNavController('nav', 'map', {
   locateBtn: document.getElementById('locate-btn-nav'),
   trafficBtn: document.getElementById('traffic-btn-nav'),
   searchbox: document.getElementById('searchbox-nav'),
+  searchwrap: document.getElementById('searchwrap-nav'),
   results: document.getElementById('results-nav'),
   routebar: document.getElementById('routebar-nav'),
   routeEta: document.getElementById('route-eta-nav'),
@@ -377,12 +526,15 @@ navInstances.nav = createNavController('nav', 'map', {
   routeCompare: document.getElementById('route-compare-nav'),
   routeCancel: document.getElementById('route-cancel-nav'),
   routeStart: document.getElementById('route-start-nav'),
+  gpsChip: document.getElementById('gps-chip-nav'),
+  guidanceBar: document.getElementById('guidance-bar-nav'),
 });
 
 navInstances.both = createNavController('both', 'map2', {
   locateBtn: document.getElementById('locate-btn-both'),
   trafficBtn: document.getElementById('traffic-btn-both'),
   searchbox: document.getElementById('searchbox-both'),
+  searchwrap: document.getElementById('searchwrap-both'),
   results: document.getElementById('results-both'),
   routebar: document.getElementById('routebar-both'),
   routeEta: document.getElementById('route-eta-both'),
@@ -390,14 +542,20 @@ navInstances.both = createNavController('both', 'map2', {
   routeCompare: document.getElementById('route-compare-both'),
   routeCancel: document.getElementById('route-cancel-both'),
   routeStart: document.getElementById('route-start-both'),
+  gpsChip: document.getElementById('gps-chip-both'),
+  guidanceBar: document.getElementById('guidance-bar-both'),
 });
 
 /* =========================================================
-   НАСТРОЙКИ — переключатель темы карты (Авто/Светлая/Тёмная)
+   НАСТРОЙКИ — тема карты (Авто/Светлая/Тёмная) и графика (Полная/Упрощённая)
    ========================================================= */
 updateThemeButtons();
+updatePerfButtons();
 document.querySelectorAll('.theme-opt').forEach(btn => {
   btn.addEventListener('click', () => setThemeMode(btn.dataset.theme));
+});
+document.querySelectorAll('.perf-opt').forEach(btn => {
+  btn.addEventListener('click', () => setPerfMode(btn.dataset.perf));
 });
 document.getElementById('settings-btn').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.add('show');

@@ -100,6 +100,7 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
 .routebar .big{font-size:26px; font-weight:700;}
 .routebar .sub{color:var(--text-dim); font-size:14px; margin-top:2px;}
 .routebar button{background:var(--red); color:#fff; border:none; border-radius:12px; padding:12px 18px; font-size:15px; font-weight:600;}
+.routebar button.start-btn{background:var(--green); color:#04220f;}
 
 .locate-btn, .traffic-btn{
   position:absolute; right:18px; z-index:1000;
@@ -224,7 +225,10 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
   <button class="locate-btn" id="locate-btn-nav">◎</button>
   <div class="routebar" id="routebar-nav">
     <div><div class="big" id="route-eta-nav">--</div><div class="sub" id="route-dist-nav">-- км</div></div>
-    <button id="route-cancel-nav">Закрыть</button>
+    <div style="display:flex; gap:8px;">
+      <button id="route-start-nav" class="start-btn">Поехали</button>
+      <button id="route-cancel-nav">✕</button>
+    </div>
   </div>
 </div>
 
@@ -269,7 +273,10 @@ body[data-view="ndgames"] #view-ndgames{display:flex;}
   <button class="locate-btn" id="locate-btn-both">◎</button>
   <div class="routebar" id="routebar-both">
     <div><div class="big" id="route-eta-both">--</div><div class="sub" id="route-dist-both">-- км</div></div>
-    <button id="route-cancel-both">Закрыть</button>
+    <div style="display:flex; gap:8px;">
+      <button id="route-start-both" class="start-btn">Поехали</button>
+      <button id="route-cancel-both">✕</button>
+    </div>
   </div>
 
   <div id="music-dock">

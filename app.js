@@ -10,10 +10,13 @@ const CONFIG = {
   DESTINATION_POLL_MS: 5000,
   SPOTIFY_PHONE_NAME: null, // например "David's iPhone"
 
-  OSRM_URL: "https://router.project-osrm.org/route/v1/driving",
+  OSRM_URL: "https://router.project-osrm.org/route/v1/driving", // больше не используется для основного маршрута — оставлен как аварийный запасной вариант
 
-  // Бесплатный ключ на developer.tomtom.com — нужен только для слоя пробок
- TOMTOM_API_KEY: "bCBwNBFLEb8BnlowlbVkpO8YwS2hn222",
+  // TomTom — используется и для слоя пробок, и для расчёта маршрута с учётом живого трафика
+  TOMTOM_API_KEY: "bCBwNBFLEb8BnlowlbVkpO8YwS2hn222",
+
+  // Карта — MapLibre + бесплатные тёмные векторные тайлы OpenFreeMap (без ключа, без лимитов)
+  MAP_STYLE: "https://tiles.openfreemap.org/styles/dark",
 
   // Ссылка на портал ND Games
   NDGAMES_URL: "https://ndgames.ge",
@@ -33,7 +36,7 @@ function showView(name) {
     if (frame.src === 'about:blank' || !frame.src) frame.src = CONFIG.NDGAMES_URL;
   }
   if ((name === 'nav' || name === 'both') && navInstances[name]) {
-    setTimeout(() => navInstances[name].map.invalidateSize(), 50);
+    setTimeout(() => navInstances[name].map.resize(), 50);
   }
 }
 document.querySelectorAll('[data-goto]').forEach(btn => {
@@ -82,35 +85,29 @@ setInterval(pollBattery, CONFIG.BATTERY_POLL_MS);
 const navInstances = {};
 
 function createNavController(viewKey, mapElId, els) {
-  const map = L.map(mapElId, {
-    zoomControl: false, attributionControl: true,
-    rotate: true, rotateControl: false, touchRotate: false, shiftKeyRotate: false
-  }).setView(CONFIG.START_CENTER, CONFIG.START_ZOOM);
-  document.getElementById(mapElId).classList.add('dark-tiles');
-
-  // отдельный "слой" для пробок — чтобы инверсия тёмной темы (filter на .leaflet-tile-pane)
-  // не портила цвета TomTom-подсветки дорог
-  map.createPane('trafficPane');
-  map.getPane('trafficPane').style.zIndex = 450;
-  map.getPane('trafficPane').style.pointerEvents = 'none';
-
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
-
-  // стрелка вместо точки — показывает направление движения, вращается на лету
-  const carIcon = L.divIcon({
-    className: '',
-    html: '<div class="car-arrow" style="width:26px;height:26px;transition:transform 0.15s linear;">' +
-      '<svg viewBox="0 0 24 24" width="26" height="26">' +
-      '<path d="M12 2L19 21L12 17L5 21Z" fill="#3ea6ff" stroke="white" stroke-width="1.4" stroke-linejoin="round"/>' +
-      '</svg></div>',
-    iconSize: [26,26], iconAnchor:[13,13]
+  const map = new maplibregl.Map({
+    container: mapElId,
+    style: CONFIG.MAP_STYLE,
+    center: [CONFIG.START_CENTER[1], CONFIG.START_CENTER[0]], // MapLibre: [lng, lat]
+    zoom: CONFIG.START_ZOOM,
+    pitch: 0,
+    bearing: 0,
+    maxPitch: 70,
+    attributionControl: { compact: true }
   });
 
-  const state = { carMarker: null, followMode: true, routeLine: null, trafficLayer: null, map, heading: 0, lastFix: null };
+  const state = { carMarker: null, followMode: true, hasRoute: false, trafficOn: false, map, heading: 0, lastFix: null };
 
-  function bearing(lat1, lon1, lat2, lon2) {
+  // выполнить fn сразу, если стиль карты уже загружен, иначе — как только загрузится
+  function whenReady(fn) { if (map.loaded()) fn(); else map.once('load', fn); }
+
+  // стрелка машины — фиксированной ориентации на экране (когда следуем за собой,
+  // разворачивается САМА КАРТА через bearing, поэтому стрелка всегда "смотрит вперёд")
+  const carEl = document.createElement('div');
+  carEl.innerHTML = '<svg viewBox="0 0 24 24" width="30" height="30">' +
+    '<path d="M12 2L19 21L12 17L5 21Z" fill="#3ea6ff" stroke="white" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+
+  function bearingCalc(lat1, lon1, lat2, lon2) {
     const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
     const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
     const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
@@ -123,62 +120,34 @@ function createNavController(viewKey, mapElId, els) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   }
 
-  // плавно едем от старой точки к новой (~700мс), а не скачем — и доворачиваем стрелку
-  function animateCarTo(lat, lng, targetHeading, durationMs) {
-    const marker = state.carMarker;
-    const from = marker.getLatLng();
-    const fromHeading = state.heading;
-    let deltaHeading = ((targetHeading - fromHeading + 540) % 360) - 180; // кратчайший поворот
-    const start = performance.now();
-
-    function step(now) {
-      const t = Math.min((now - start) / durationMs, 1);
-      const curLat = from.lat + (lat - from.lat) * t;
-      const curLng = from.lng + (lng - from.lng) * t;
-      marker.setLatLng([curLat, curLng]);
-
-      const el = marker.getElement();
-      const mapCanRotate = typeof map.setBearing === 'function';
-      const currentAngle = fromHeading + deltaHeading * t;
-      if (el) {
-        const arrow = el.querySelector('.car-arrow');
-        // если карта сама умеет поворачиваться — стрелка всегда смотрит "вверх" (это уже и есть направление движения),
-        // иначе поворачиваем саму стрелку поверх неподвижной карты
-        if (arrow) arrow.style.transform = `rotate(${mapCanRotate ? 0 : currentAngle}deg)`;
-      }
-      if (mapCanRotate && state.followMode) map.setBearing(currentAngle);
-      if (state.followMode) map.panTo([curLat, curLng], { animate: false });
-
-      if (t < 1) requestAnimationFrame(step);
-      else state.heading = targetHeading;
-    }
-    requestAnimationFrame(step);
-  }
-
   if ('geolocation' in navigator) {
     navigator.geolocation.watchPosition(pos => {
       const { latitude, longitude, heading, speed } = pos.coords;
       const now = Date.now();
 
       if (!state.carMarker) {
-        state.carMarker = L.marker([latitude, longitude], { icon: carIcon }).addTo(map);
+        state.carMarker = new maplibregl.Marker({ element: carEl }).setLngLat([longitude, latitude]).addTo(map);
         state.lastFix = { lat: latitude, lng: longitude, t: now };
-        if (state.followMode) map.setView([latitude, longitude], 17);
+        whenReady(() => { if (state.followMode) map.jumpTo({ center: [longitude, latitude], zoom: 17.5, pitch: 60 }); });
         return;
       }
 
-      // берём курс от GPS-чипа, если он его отдаёт и машина реально едет;
-      // иначе считаем сами по смещению между засечками (и не дёргаем стрелку, если стоим на месте)
       let targetHeading = state.heading;
       const movedMeters = state.lastFix ? distanceMeters(state.lastFix.lat, state.lastFix.lng, latitude, longitude) : 0;
       if (typeof heading === 'number' && !isNaN(heading) && (speed || 0) > 0.5) {
         targetHeading = heading;
       } else if (movedMeters > 3 && state.lastFix) {
-        targetHeading = bearing(state.lastFix.lat, state.lastFix.lng, latitude, longitude);
+        targetHeading = bearingCalc(state.lastFix.lat, state.lastFix.lng, latitude, longitude);
       }
 
+      state.carMarker.setLngLat([longitude, latitude]);
+      state.heading = targetHeading;
+
       const dt = state.lastFix ? Math.min(Math.max(now - state.lastFix.t, 400), 2000) : 800;
-      animateCarTo(latitude, longitude, targetHeading, dt);
+      if (state.followMode) {
+        // easeTo сам плавно анимирует центр/поворот/наклон/зум — ручной requestAnimationFrame не нужен
+        map.easeTo({ center: [longitude, latitude], bearing: targetHeading, pitch: 60, zoom: Math.max(map.getZoom(), 17), duration: dt, easing: t => t });
+      }
       state.lastFix = { lat: latitude, lng: longitude, t: now };
     }, err => console.warn('geolocation error', err), { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
   }
@@ -187,28 +156,33 @@ function createNavController(viewKey, mapElId, els) {
   els.locateBtn.addEventListener('click', () => {
     state.followMode = true;
     if (state.carMarker) {
-      map.setView(state.carMarker.getLatLng(), Math.max(map.getZoom(), 17), { animate: true });
-      if (typeof map.setBearing === 'function') map.setBearing(state.heading);
+      map.easeTo({ center: state.carMarker.getLngLat(), zoom: Math.max(map.getZoom(), 17), pitch: 60, bearing: state.heading, duration: 600 });
     }
   });
 
-  // трафик от TomTom (реальные пробки — обычные тайлы OSM их не показывают)
+  // трафик от TomTom — отдельный растровый слой поверх векторной карты
   els.trafficBtn.addEventListener('click', () => {
     if (!CONFIG.TOMTOM_API_KEY) { alert('Добавь TOMTOM_API_KEY в CONFIG для слоя пробок'); return; }
-    if (state.trafficLayer) {
-      map.removeLayer(state.trafficLayer);
-      state.trafficLayer = null;
-      els.trafficBtn.classList.remove('active');
-    } else {
-      state.trafficLayer = L.tileLayer(
-        `https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${CONFIG.TOMTOM_API_KEY}`,
-        { maxZoom: 19, opacity: 0.9, pane: 'trafficPane' }
-      ).addTo(map);
-      els.trafficBtn.classList.add('active');
-    }
+    whenReady(() => {
+      if (state.trafficOn) {
+        if (map.getLayer('traffic-layer')) map.removeLayer('traffic-layer');
+        if (map.getSource('traffic-src')) map.removeSource('traffic-src');
+        state.trafficOn = false;
+        els.trafficBtn.classList.remove('active');
+      } else {
+        map.addSource('traffic-src', {
+          type: 'raster',
+          tiles: [`https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${CONFIG.TOMTOM_API_KEY}`],
+          tileSize: 256
+        });
+        map.addLayer({ id: 'traffic-layer', type: 'raster', source: 'traffic-src', paint: { 'raster-opacity': 0.9 } });
+        state.trafficOn = true;
+        els.trafficBtn.classList.add('active');
+      }
+    });
   });
 
-  // поиск
+  // поиск (Nominatim — геокодинг, тот же, что и раньше)
   let searchTimer = null;
   els.searchbox.addEventListener('input', () => {
     clearTimeout(searchTimer);
@@ -219,7 +193,7 @@ function createNavController(viewKey, mapElId, els) {
 
   async function doSearch(query) {
     try {
-      const center = state.carMarker ? state.carMarker.getLatLng() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
+      const center = state.carMarker ? state.carMarker.getLngLat() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
       const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}` +
         `&limit=6&viewbox=${center.lng-1},${center.lat+1},${center.lng+1},${center.lat-1}&bounded=0`;
       const res = await fetch(url, { headers: { 'Accept-Language': 'ru' } });
@@ -244,32 +218,57 @@ function createNavController(viewKey, mapElId, els) {
     els.results.style.display = 'block';
   }
 
+  // маршрут — TomTom Routing API с traffic=true: время в пути считается по живым пробкам,
+  // а не по формальным ограничениям скорости, как было у OSRM
   async function routeTo(destLat, destLon) {
-    const start = state.carMarker ? state.carMarker.getLatLng() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
-    const url = `${CONFIG.OSRM_URL}/${start.lng},${start.lat};${destLon},${destLat}?overview=full&geometries=geojson`;
+    if (!CONFIG.TOMTOM_API_KEY) { alert('Нужен TOMTOM_API_KEY для построения маршрута'); return; }
+    const start = state.carMarker ? state.carMarker.getLngLat() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
+    const url = `https://api.tomtom.com/routing/1/calculateRoute/${start.lat},${start.lng}:${destLat},${destLon}/json` +
+      `?key=${CONFIG.TOMTOM_API_KEY}&traffic=true&travelMode=car`;
     try {
       const res = await fetch(url);
       const data = await res.json();
       if (!data.routes || !data.routes.length) return;
       const route = data.routes[0];
+      const coords = route.legs.flatMap(leg => leg.points.map(p => [p.longitude, p.latitude]));
 
-      if (state.routeLine) map.removeLayer(state.routeLine);
-      const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
-      state.routeLine = L.polyline(coords, { color: '#3ea6ff', weight: 6, opacity: 0.9 }).addTo(map);
-      state.followMode = false;
-      if (typeof map.setBearing === 'function') map.setBearing(0); // общий обзор маршрута всегда "север сверху"
-      map.fitBounds(state.routeLine.getBounds(), { padding: [60, 60] });
+      const geojson = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} };
+      whenReady(() => {
+        if (map.getSource('route-src')) {
+          map.getSource('route-src').setData(geojson);
+        } else {
+          map.addSource('route-src', { type: 'geojson', data: geojson });
+          map.addLayer({
+            id: 'route-layer', type: 'line', source: 'route-src',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#3ea6ff', 'line-width': 6, 'line-opacity': 0.9 }
+          });
+        }
+        state.hasRoute = true;
 
-      const mins = Math.round(route.duration / 60);
-      const km = (route.distance / 1000).toFixed(1);
+        const lngs = coords.map(c => c[0]), lats = coords.map(c => c[1]);
+        state.followMode = false;
+        map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
+          { padding: 60, pitch: 0, bearing: 0, duration: 500 });
+      });
+
+      const summary = route.summary;
+      const mins = Math.round(summary.travelTimeInSeconds / 60);
+      const km = (summary.lengthInMeters / 1000).toFixed(1);
+      const delayMin = summary.trafficDelayInSeconds ? Math.round(summary.trafficDelayInSeconds / 60) : 0;
       els.routeEta.textContent = mins < 60 ? `${mins} мин` : `${Math.floor(mins/60)} ч ${mins%60} мин`;
-      els.routeDist.textContent = `${km} км`;
+      els.routeDist.textContent = delayMin > 0 ? `${km} км · +${delayMin} мин в пробках` : `${km} км`;
       els.routebar.style.display = 'flex';
-    } catch (e) { console.error('routing failed', e); }
+    } catch (e) {
+      console.error('routing failed', e);
+      alert('Не удалось построить маршрут — проверь ключ TomTom и соединение');
+    }
   }
 
   els.routeCancel.addEventListener('click', () => {
-    if (state.routeLine) { map.removeLayer(state.routeLine); state.routeLine = null; }
+    if (map.getLayer && map.getLayer('route-layer')) map.removeLayer('route-layer');
+    if (map.getSource && map.getSource('route-src')) map.removeSource('route-src');
+    state.hasRoute = false;
     els.routebar.style.display = 'none';
   });
 
@@ -410,7 +409,7 @@ async function pollDestination() {
       target.routeTo(dest.lat, dest.lon);
       if (view !== 'nav' && view !== 'both') showView('both');
     } else if (dest.query) {
-      const center = target.state.carMarker ? target.state.carMarker.getLatLng() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
+      const center = target.state.carMarker ? target.state.carMarker.getLngLat() : { lat: CONFIG.START_CENTER[0], lng: CONFIG.START_CENTER[1] };
       const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(dest.query)}&limit=1`;
       const geo = await fetch(url, { headers: { 'Accept-Language': 'ru' } }).then(r => r.json());
       if (geo && geo[0]) {

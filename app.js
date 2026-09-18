@@ -13,7 +13,7 @@ const CONFIG = {
   OSRM_URL: "https://router.project-osrm.org/route/v1/driving",
 
   // Бесплатный ключ на developer.tomtom.com — нужен только для слоя пробок
-  TOMTOM_API_KEY: null,
+  TOMTOM_API_KEY: "bCBwNBFLEb8BnlowlbVkpO8YwS2hn222",
 
   // Ссылка на портал ND Games
   NDGAMES_URL: "https://ndgames.ge",

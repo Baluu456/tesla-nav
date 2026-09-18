@@ -15,8 +15,11 @@ const CONFIG = {
   // TomTom — используется и для слоя пробок, и для расчёта маршрута с учётом живого трафика
   TOMTOM_API_KEY: "bCBwNBFLEb8BnlowlbVkpO8YwS2hn222",
 
-  // Карта — MapLibre + бесплатные тёмные векторные тайлы OpenFreeMap (без ключа, без лимитов)
-  MAP_STYLE: "https://tiles.openfreemap.org/styles/dark",
+  // Карта — MapLibre + бесплатные векторные тайлы OpenFreeMap (без ключа, без лимитов)
+  MAP_STYLE_LIGHT: "https://tiles.openfreemap.org/styles/liberty",
+  MAP_STYLE_DARK: "https://tiles.openfreemap.org/styles/dark",
+  DAY_START_HOUR: 7,   // с этого часа — светлая тема (при режиме "Авто")
+  NIGHT_START_HOUR: 19, // с этого часа — тёмная тема
 
   // Ссылка на портал ND Games
   NDGAMES_URL: "https://ndgames.ge",
@@ -84,10 +87,37 @@ setInterval(pollBattery, CONFIG.BATTERY_POLL_MS);
    ========================================================= */
 const navInstances = {};
 
+/* =========================================================
+   ТЕМА КАРТЫ — день/ночь по времени (режим "Авто") или вручную,
+   выбор сохраняется в браузере
+   ========================================================= */
+const THEME_KEY = 'teslaNavThemeMode'; // 'auto' | 'light' | 'dark'
+function getThemeMode() { return localStorage.getItem(THEME_KEY) || 'auto'; }
+function setThemeMode(mode) { localStorage.setItem(THEME_KEY, mode); applyThemeToAllMaps(); updateThemeButtons(); }
+function isDaytimeNow() {
+  const h = new Date().getHours();
+  return h >= CONFIG.DAY_START_HOUR && h < CONFIG.NIGHT_START_HOUR;
+}
+function effectiveStyleUrl() {
+  const mode = getThemeMode();
+  const light = mode === 'light' || (mode === 'auto' && isDaytimeNow());
+  return light ? CONFIG.MAP_STYLE_LIGHT : CONFIG.MAP_STYLE_DARK;
+}
+function applyThemeToAllMaps() {
+  const url = effectiveStyleUrl();
+  Object.values(navInstances).forEach(inst => inst && inst.setTheme && inst.setTheme(url));
+}
+function updateThemeButtons() {
+  const mode = getThemeMode();
+  document.querySelectorAll('.theme-opt').forEach(b => b.classList.toggle('active', b.dataset.theme === mode));
+}
+// раз в 5 минут перепроверяем — вдруг наступило 7:00 или 19:00, пока страница открыта
+setInterval(() => { if (getThemeMode() === 'auto') applyThemeToAllMaps(); }, 5 * 60 * 1000);
+
 function createNavController(viewKey, mapElId, els) {
   const map = new maplibregl.Map({
     container: mapElId,
-    style: CONFIG.MAP_STYLE,
+    style: effectiveStyleUrl(),
     center: [CONFIG.START_CENTER[1], CONFIG.START_CENTER[0]], // MapLibre: [lng, lat]
     zoom: CONFIG.START_ZOOM,
     pitch: 0,
@@ -96,7 +126,7 @@ function createNavController(viewKey, mapElId, els) {
     attributionControl: { compact: true }
   });
 
-  const state = { carMarker: null, followMode: true, hasRoute: false, trafficOn: false, map, heading: 0, lastFix: null };
+  const state = { carMarker: null, followMode: true, hasRoute: false, trafficOn: false, map, heading: 0, lastFix: null, lastRouteGeojson: null };
 
   // выполнить fn сразу, если стиль карты уже загружен, иначе — как только загрузится
   function whenReady(fn) { if (map.loaded()) fn(); else map.once('load', fn); }
@@ -172,7 +202,9 @@ function createNavController(viewKey, mapElId, els) {
       } else {
         map.addSource('traffic-src', {
           type: 'raster',
-          tiles: [`https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${CONFIG.TOMTOM_API_KEY}`],
+          // absolute — красит ВСЕ дороги постоянно по текущей скорости (как Google/Яндекс),
+          // а не только явные заторы (так было у relative0 — там пусто, если нет отклонений)
+          tiles: [`https://api.tomtom.com/traffic/map/4/tile/flow/absolute/{z}/{x}/{y}.png?key=${CONFIG.TOMTOM_API_KEY}`],
           tileSize: 256
         });
         map.addLayer({ id: 'traffic-layer', type: 'raster', source: 'traffic-src', paint: { 'raster-opacity': 0.9 } });
@@ -233,6 +265,7 @@ function createNavController(viewKey, mapElId, els) {
       const coords = route.legs.flatMap(leg => leg.points.map(p => [p.longitude, p.latitude]));
 
       const geojson = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} };
+      state.lastRouteGeojson = geojson;
       whenReady(() => {
         if (map.getSource('route-src')) {
           map.getSource('route-src').setData(geojson);
@@ -250,6 +283,7 @@ function createNavController(viewKey, mapElId, els) {
         state.followMode = false;
         map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
           { padding: 60, pitch: 0, bearing: 0, duration: 500 });
+        els.routeStart.style.display = ''; // новый маршрут выбран — кнопка "Поехали" снова доступна
       });
 
       const summary = route.summary;
@@ -269,18 +303,49 @@ function createNavController(viewKey, mapElId, els) {
     if (map.getLayer && map.getLayer('route-layer')) map.removeLayer('route-layer');
     if (map.getSource && map.getSource('route-src')) map.removeSource('route-src');
     state.hasRoute = false;
+    state.lastRouteGeojson = null;
     els.routebar.style.display = 'none';
   });
 
   // "Поехали" — переходим из общего обзора маршрута обратно в наклонённый режим слежения за собой
   els.routeStart.addEventListener('click', () => {
     state.followMode = true;
+    els.routeStart.style.display = 'none'; // навигация уже началась — повторно жать нечего
     if (state.carMarker) {
       map.easeTo({ center: state.carMarker.getLngLat(), zoom: 17.5, pitch: 60, bearing: state.heading, duration: 800 });
     }
   });
 
-  return { map, state, routeTo, doSearch };
+  // смена темы (день/ночь) — MapLibre при setStyle стирает все наши источники/слои,
+  // поэтому после загрузки новой темы переигрываем трафик и маршрут заново
+  state.currentStyleUrl = effectiveStyleUrl();
+  function setTheme(url) {
+    if (url === state.currentStyleUrl) return;
+    state.currentStyleUrl = url;
+    const hadTraffic = state.trafficOn;
+    const routeGeojson = state.lastRouteGeojson;
+    map.setStyle(url);
+    map.once('style.load', () => {
+      if (hadTraffic) {
+        map.addSource('traffic-src', {
+          type: 'raster',
+          tiles: [`https://api.tomtom.com/traffic/map/4/tile/flow/absolute/{z}/{x}/{y}.png?key=${CONFIG.TOMTOM_API_KEY}`],
+          tileSize: 256
+        });
+        map.addLayer({ id: 'traffic-layer', type: 'raster', source: 'traffic-src', paint: { 'raster-opacity': 0.9 } });
+      }
+      if (routeGeojson) {
+        map.addSource('route-src', { type: 'geojson', data: routeGeojson });
+        map.addLayer({
+          id: 'route-layer', type: 'line', source: 'route-src',
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#3ea6ff', 'line-width': 6, 'line-opacity': 0.9 }
+        });
+      }
+    });
+  }
+
+  return { map, state, routeTo, doSearch, setTheme };
 }
 
 navInstances.nav = createNavController('nav', 'map', {
@@ -305,6 +370,20 @@ navInstances.both = createNavController('both', 'map2', {
   routeDist: document.getElementById('route-dist-both'),
   routeCancel: document.getElementById('route-cancel-both'),
   routeStart: document.getElementById('route-start-both'),
+});
+
+/* =========================================================
+   НАСТРОЙКИ — переключатель темы карты (Авто/Светлая/Тёмная)
+   ========================================================= */
+updateThemeButtons();
+document.querySelectorAll('.theme-opt').forEach(btn => {
+  btn.addEventListener('click', () => setThemeMode(btn.dataset.theme));
+});
+document.getElementById('settings-btn').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.add('show');
+});
+document.getElementById('settings-close').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.remove('show');
 });
 
 /* =========================================================

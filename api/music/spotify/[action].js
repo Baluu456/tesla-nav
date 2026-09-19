@@ -18,10 +18,13 @@ module.exports = async (req, res) => {
     if (req.method === 'GET' && action === 'playlist-tracks') {
       const { id } = req.query;
       if (!id) return res.status(400).json({ error: 'нужен id плейлиста' });
-      const data = await spotifyFetch(
-        `/playlists/${id}/tracks?limit=100&fields=total,items(track(name,uri,duration_ms,artists(name)))`
-      );
-      const items = (data.items || [])
+      // без фильтра fields — берём весь ответ Spotify как есть и сами вырезаем нужное;
+      // фильтр fields на некоторых плейлистах у Spotify почему-то возвращал пустоту
+      const data = await spotifyFetch(`/playlists/${id}/tracks?limit=100`);
+      if (!data || !Array.isArray(data.items)) {
+        return res.status(502).json({ error: 'Spotify вернул неожиданный ответ', raw: data });
+      }
+      const items = data.items
         .filter(it => it.track) // выкидываем удалённые/недоступные треки
         .map(it => ({
           uri: it.track.uri,

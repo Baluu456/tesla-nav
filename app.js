@@ -629,7 +629,7 @@ async function loadPlaylists(gridEl, deviceLabelEl) {
       card.className = gridEl.id === 'dock-pl-list' ? 'dock-card' : 'sp-card';
       card.innerHTML = `<img src="${pl.image || ''}" onerror="this.style.visibility='hidden'"/>
         <div class="name">${pl.name}</div>${gridEl.id === 'dock-pl-list' ? '' : `<div class="count">${pl.tracks_total} треков</div>`}`;
-      card.addEventListener('click', () => playPlaylist(pl, card, gridEl));
+      card.addEventListener('click', () => openPlaylistDetail(pl));
       gridEl.appendChild(card);
     });
     if (!items.length) gridEl.innerHTML = '<div style="color:var(--text-dim)">Плейлистов не найдено</div>';
@@ -638,14 +638,73 @@ async function loadPlaylists(gridEl, deviceLabelEl) {
   }
 }
 
-async function playPlaylist(pl, cardEl, gridEl) {
+/* =========================================================
+   ЭКРАН ПЛЕЙЛИСТА — список треков, шафл, тап по треку играет именно его
+   ========================================================= */
+const trackDetailOverlay = document.getElementById('track-detail-overlay');
+let shuffleOn = false;
+let currentPlaylist = null;
+
+async function openPlaylistDetail(pl) {
+  currentPlaylist = pl;
+  trackDetailOverlay.classList.add('show');
+  document.getElementById('td-title').textContent = pl.name;
+  const listEl = document.getElementById('td-tracklist');
+  listEl.innerHTML = '<div style="color:var(--text-dim); padding:12px;">Загрузка…</div>';
+
+  try {
+    const res = await fetch(musicUrl(`/playlist-tracks?id=${encodeURIComponent(pl.id)}`));
+    const data = await res.json();
+    const items = data.items || [];
+    listEl.innerHTML = '';
+    items.forEach((t, i) => {
+      const row = document.createElement('button');
+      row.className = 'td-track';
+      row.innerHTML = `<span class="idx">${i + 1}</span>
+        <div class="meta"><div class="name">${t.name}</div><div class="artist">${t.artist}</div></div>`;
+      row.addEventListener('click', () => {
+        listEl.querySelectorAll('.playing').forEach(r => r.classList.remove('playing'));
+        row.classList.add('playing');
+        playPlaylist(pl, null, null, t.uri);
+      });
+      listEl.appendChild(row);
+    });
+    if (!items.length) listEl.innerHTML = '<div style="color:var(--text-dim); padding:12px;">Треков не найдено</div>';
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--text-dim); padding:12px;">Ошибка загрузки треков</div>';
+  }
+}
+
+document.getElementById('td-back').addEventListener('click', () => {
+  trackDetailOverlay.classList.remove('show');
+});
+document.getElementById('td-playall').addEventListener('click', () => {
+  if (currentPlaylist) playPlaylist(currentPlaylist, null, null, null);
+});
+document.getElementById('td-shuffle').addEventListener('click', async () => {
+  shuffleOn = !shuffleOn;
+  const btn = document.getElementById('td-shuffle');
+  btn.textContent = shuffleOn ? '🔀 Шафл: вкл' : '🔀 Шафл: выкл';
+  btn.classList.toggle('active', shuffleOn);
+  try {
+    await fetch(musicUrl('/shuffle'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: shuffleOn, device_id: activeDeviceId })
+    });
+  } catch (e) {}
+});
+
+// track_uri — если задан, играем именно с этого трека (не с начала плейлиста)
+async function playPlaylist(pl, cardEl, gridEl, trackUri) {
   if (!activeDeviceId) return;
-  gridEl.querySelectorAll('.playing').forEach(c => c.classList.remove('playing'));
-  cardEl.classList.add('playing');
+  if (gridEl) {
+    gridEl.querySelectorAll('.playing').forEach(c => c.classList.remove('playing'));
+    if (cardEl) cardEl.classList.add('playing');
+  }
   try {
     await fetch(musicUrl('/play'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ context_uri: pl.uri, device_id: activeDeviceId })
+      body: JSON.stringify({ context_uri: pl.uri, device_id: activeDeviceId, track_uri: trackUri || undefined })
     });
   } catch (e) { console.error('play failed', e); }
 }

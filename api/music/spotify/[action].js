@@ -34,6 +34,12 @@ module.exports = async (req, res) => {
       return res.json({ total: data.total, items });
     }
 
+    // диагностика — под каким аккаунтом Spotify реально сохранён токен на сервере
+    if (req.method === 'GET' && action === 'whoami') {
+      const data = await spotifyFetch('/me');
+      return res.json({ id: data.id, display_name: data.display_name, email: data.email, product: data.product });
+    }
+
     if (req.method === 'GET' && action === 'devices') {
       return res.json(await spotifyFetch('/me/player/devices'));
     }

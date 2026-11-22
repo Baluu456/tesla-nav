@@ -117,8 +117,8 @@ function isVice(v) { return v === VICE; }
    ========================================================= */
 const VICE_COLORS = {
   land: '#1a1b3a', park: '#1c2d4d', wood: '#1a2947', water: '#0e2a5c', sand: '#25264a',
-  build: '#3a3f9a',
-  roadCase: '#0d0e26', road: '#5d6280', roadMain: '#767b9c', motor: '#9aa0c4', service: '#454966',
+  build: '#2c3080',
+  roadCase: '#0b0c22', road: '#7d83a8', roadMain: '#9ca2c6', motor: '#bcc1e4', service: '#565b7e',
   text: '#d4d8ff', halo: '#14153a', route: '#ff4fa3'
 };
 function buildViceStyle() {
@@ -157,19 +157,22 @@ function buildViceStyle() {
       { id: 'building', type: 'fill-extrusion', source: 'omt', 'source-layer': 'building', minzoom: 14,
         paint: {
           'fill-extrusion-color': t.build,
-          'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
-          'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-          'fill-extrusion-opacity': 0.95
+          // высоту режем вдвое, чтобы дома не закрывали дороги и поворот на камере сверху
+          'fill-extrusion-height': ['*', 0.45, ['coalesce', ['get', 'render_height'], 6]],
+          'fill-extrusion-base': ['*', 0.45, ['coalesce', ['get', 'render_min_height'], 0]],
+          'fill-extrusion-opacity': 0.92,
+          'fill-extrusion-vertical-gradient': false
         } },
 
-      road('road-service-case', f('service', 'track', 'path'), t.roadCase, w(0.5, 3, 10), 14),
-      road('road-minor-case', f('minor', 'tertiary'), t.roadCase, w(1.5, 7, 24), 11),
-      road('road-main-case', f('secondary', 'primary', 'trunk'), t.roadCase, w(2.5, 10, 32)),
-      road('road-motor-case', f('motorway'), t.roadCase, w(3, 12, 36)),
-      road('road-service', f('service', 'track', 'path'), t.service, w(0.2, 1.8, 7), 14),
-      road('road-minor', f('minor', 'tertiary'), t.road, w(0.8, 5, 20), 11),
-      road('road-main', f('secondary', 'primary', 'trunk'), t.roadMain, w(1.5, 8, 28)),
-      road('road-motor', f('motorway'), t.motor, w(2, 10, 32)),
+      // дороги рисуем ВЫШЕ зданий и шире, чтобы читались даже при наклоне камеры
+      road('road-service-case', f('service', 'track', 'path'), t.roadCase, w(1, 4, 14), 14),
+      road('road-minor-case', f('minor', 'tertiary'), t.roadCase, w(2.5, 10, 36), 11),
+      road('road-main-case', f('secondary', 'primary', 'trunk'), t.roadCase, w(3.5, 14, 46)),
+      road('road-motor-case', f('motorway'), t.roadCase, w(4, 16, 50)),
+      road('road-service', f('service', 'track', 'path'), t.service, w(0.4, 2.5, 9), 14),
+      road('road-minor', f('minor', 'tertiary'), t.road, w(1.5, 7, 28), 11),
+      road('road-main', f('secondary', 'primary', 'trunk'), t.roadMain, w(2.5, 11, 38)),
+      road('road-motor', f('motorway'), t.motor, w(3, 13, 42)),
 
       { id: 'road-labels', type: 'symbol', source: 'omt', 'source-layer': 'transportation_name', minzoom: 13,
         layout: {

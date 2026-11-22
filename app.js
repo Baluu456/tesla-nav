@@ -91,7 +91,8 @@ const navInstances = {};
    ТЕМА КАРТЫ — день/ночь по времени (режим "Авто") или вручную,
    выбор сохраняется в браузере
    ========================================================= */
-const THEME_KEY = 'teslaNavThemeMode'; // 'auto' | 'light' | 'dark'
+const THEME_KEY = 'teslaNavThemeMode'; // 'auto' | 'light' | 'dark' | 'vice'
+const VICE = 'vice'; // условный «адрес» собственного стиля — строится кодом, а не берётся по URL
 function getThemeMode() { return localStorage.getItem(THEME_KEY) || 'auto'; }
 function setThemeMode(mode) { localStorage.setItem(THEME_KEY, mode); applyThemeToAllMaps(); updateThemeButtons(); }
 function isDaytimeNow() {
@@ -100,8 +101,91 @@ function isDaytimeNow() {
 }
 function effectiveStyleUrl() {
   const mode = getThemeMode();
+  if (mode === 'vice') return VICE;
   const light = mode === 'light' || (mode === 'auto' && isDaytimeNow());
   return light ? CONFIG.MAP_STYLE_LIGHT : CONFIG.MAP_STYLE_DARK;
+}
+// MapLibre принимает либо URL стиля, либо готовый объект — для Vice отдаём объект
+function resolveStyle(v) { return v === VICE ? buildViceStyle() : v; }
+function isVice(v) { return v === VICE; }
+
+/* =========================================================
+   СТИЛЬ «VICE» — свой стиль карты в духе неонового радара:
+   тёмно-синий фон и кварталы, серые дороги, розовый маршрут.
+   Те же бесплатные тайлы OpenFreeMap (схема OpenMapTiles),
+   ничего из игр не используется — только свои цвета и слои.
+   ========================================================= */
+const VICE_COLORS = {
+  land: '#1a1b3a', park: '#1c2d4d', wood: '#1a2947', water: '#0e2a5c', sand: '#25264a',
+  build: '#3a3f9a',
+  roadCase: '#0d0e26', road: '#5d6280', roadMain: '#767b9c', motor: '#9aa0c4', service: '#454966',
+  text: '#d4d8ff', halo: '#14153a', route: '#ff4fa3'
+};
+function buildViceStyle() {
+  const t = VICE_COLORS;
+  const f = (...cls) => ['in', ['get', 'class'], ['literal', cls]];
+  const w = (a, b, c) => ['interpolate', ['exponential', 1.5], ['zoom'], 10, a, 15, b, 19, c];
+  const road = (id, filter, color, width, minzoom) => ({
+    id, type: 'line', source: 'omt', 'source-layer': 'transportation', filter,
+    ...(minzoom ? { minzoom } : {}),
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': color, 'line-width': width }
+  });
+  return {
+    version: 8,
+    glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
+    sources: { omt: { type: 'vector', url: 'https://tiles.openfreemap.org/planet' } },
+    layers: [
+      { id: 'bg', type: 'background', paint: { 'background-color': t.land } },
+      { id: 'landcover-wood', type: 'fill', source: 'omt', 'source-layer': 'landcover',
+        filter: ['==', ['get', 'class'], 'wood'], paint: { 'fill-color': t.wood } },
+      { id: 'landcover-grass', type: 'fill', source: 'omt', 'source-layer': 'landcover',
+        filter: f('grass', 'farmland'), paint: { 'fill-color': t.park } },
+      { id: 'landcover-sand', type: 'fill', source: 'omt', 'source-layer': 'landcover',
+        filter: ['==', ['get', 'class'], 'sand'], paint: { 'fill-color': t.sand } },
+      { id: 'park', type: 'fill', source: 'omt', 'source-layer': 'park', paint: { 'fill-color': t.park } },
+      { id: 'landuse-green', type: 'fill', source: 'omt', 'source-layer': 'landuse',
+        filter: f('cemetery', 'pitch', 'playground', 'garden'), paint: { 'fill-color': t.park } },
+      { id: 'water', type: 'fill', source: 'omt', 'source-layer': 'water', paint: { 'fill-color': t.water } },
+      { id: 'waterway', type: 'line', source: 'omt', 'source-layer': 'waterway',
+        paint: { 'line-color': t.water, 'line-width': w(0.5, 2, 6) } },
+
+      // здания: объёмные в «полной» графике, в «упрощённой» их скрывает toggleBuildingExtrusion,
+      // а плоский слой ниже остаётся — кварталы видны всегда
+      { id: 'building-flat', type: 'fill', source: 'omt', 'source-layer': 'building', minzoom: 14,
+        paint: { 'fill-color': t.build, 'fill-opacity': 0.9 } },
+      { id: 'building', type: 'fill-extrusion', source: 'omt', 'source-layer': 'building', minzoom: 14,
+        paint: {
+          'fill-extrusion-color': t.build,
+          'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
+          'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
+          'fill-extrusion-opacity': 0.95
+        } },
+
+      road('road-service-case', f('service', 'track', 'path'), t.roadCase, w(0.5, 3, 10), 14),
+      road('road-minor-case', f('minor', 'tertiary'), t.roadCase, w(1.5, 7, 24), 11),
+      road('road-main-case', f('secondary', 'primary', 'trunk'), t.roadCase, w(2.5, 10, 32)),
+      road('road-motor-case', f('motorway'), t.roadCase, w(3, 12, 36)),
+      road('road-service', f('service', 'track', 'path'), t.service, w(0.2, 1.8, 7), 14),
+      road('road-minor', f('minor', 'tertiary'), t.road, w(0.8, 5, 20), 11),
+      road('road-main', f('secondary', 'primary', 'trunk'), t.roadMain, w(1.5, 8, 28)),
+      road('road-motor', f('motorway'), t.motor, w(2, 10, 32)),
+
+      { id: 'road-labels', type: 'symbol', source: 'omt', 'source-layer': 'transportation_name', minzoom: 13,
+        layout: {
+          'symbol-placement': 'line', 'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+          'text-font': ['Noto Sans Regular'], 'text-size': 13
+        },
+        paint: { 'text-color': t.text, 'text-halo-color': t.halo, 'text-halo-width': 1.5 } },
+      { id: 'place', type: 'symbol', source: 'omt', 'source-layer': 'place', maxzoom: 15,
+        layout: {
+          'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+          'text-font': ['Noto Sans Bold'], 'text-size': ['interpolate', ['linear'], ['zoom'], 8, 13, 14, 20],
+          'text-transform': 'uppercase', 'text-letter-spacing': 0.08
+        },
+        paint: { 'text-color': t.text, 'text-halo-color': t.halo, 'text-halo-width': 2 } }
+    ]
+  };
 }
 function applyThemeToAllMaps() {
   const url = effectiveStyleUrl();
@@ -122,7 +206,11 @@ setInterval(() => { if (getThemeMode() === 'auto') applyThemeToAllMaps(); }, 5 *
 const PERF_KEY = 'teslaNavPerfMode'; // 'full' | 'lite'
 function getPerfMode() { return localStorage.getItem(PERF_KEY) || 'full'; }
 function setPerfMode(mode) { localStorage.setItem(PERF_KEY, mode); Object.values(navInstances).forEach(i => i && i.applyPerf()); updatePerfButtons(); }
-function followPitch() { return getPerfMode() === 'lite' ? 0 : 60; }
+// в Vice камера ниже наклонена (почти вид сверху, как радар) — так кварталы читаются лучше
+function followPitch() {
+  if (getPerfMode() === 'lite') return 0;
+  return isVice(effectiveStyleUrl()) ? 35 : 60;
+}
 function updatePerfButtons() {
   const mode = getPerfMode();
   document.querySelectorAll('.perf-opt').forEach(b => b.classList.toggle('active', b.dataset.perf === mode));
@@ -164,7 +252,7 @@ function restoreFullMap(map) {
 function createNavController(viewKey, mapElId, els) {
   const map = new maplibregl.Map({
     container: mapElId,
-    style: effectiveStyleUrl(),
+    style: resolveStyle(effectiveStyleUrl()),
     center: [CONFIG.START_CENTER[1], CONFIG.START_CENTER[0]], // MapLibre: [lng, lat]
     zoom: CONFIG.START_ZOOM,
     pitch: 0,
@@ -183,6 +271,9 @@ function createNavController(viewKey, mapElId, els) {
   const carEl = document.createElement('div');
   carEl.innerHTML = '<svg viewBox="0 0 24 24" width="30" height="30">' +
     '<path d="M12 2L19 21L12 17L5 21Z" fill="#3ea6ff" stroke="white" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  // цвет стрелки и маршрута зависит от темы: голубой по умолчанию, розовый в Vice
+  function accentColor() { return isVice(state.currentStyleUrl) ? VICE_COLORS.route : '#3ea6ff'; }
+  function paintCar() { carEl.querySelector('path').setAttribute('fill', accentColor()); }
 
   function bearingCalc(lat1, lon1, lat2, lon2) {
     const toRad = d => d * Math.PI / 180, toDeg = r => r * 180 / Math.PI;
@@ -372,7 +463,7 @@ function createNavController(viewKey, mapElId, els) {
           map.addLayer({
             id: 'route-layer', type: 'line', source: 'route-src',
             layout: { 'line-cap': 'round', 'line-join': 'round' },
-            paint: { 'line-color': '#3ea6ff', 'line-width': 6, 'line-opacity': 0.9 }
+            paint: { 'line-color': accentColor(), 'line-width': 6, 'line-opacity': 0.9 }
           });
         }
         state.hasRoute = true;
@@ -389,7 +480,9 @@ function createNavController(viewKey, mapElId, els) {
       const km = (summary.lengthInMeters / 1000).toFixed(1);
       const delayMin = summary.trafficDelayInSeconds ? Math.round(summary.trafficDelayInSeconds / 60) : 0;
       els.routeEta.textContent = mins < 60 ? `${mins} мин` : `${Math.floor(mins/60)} ч ${mins%60} мин`;
-      els.routeDist.textContent = delayMin > 0 ? `${km} км · +${delayMin} мин в пробках` : `${km} км`;
+      const arrival = new Date(Date.now() + summary.travelTimeInSeconds * 1000);
+      const arrivalStr = arrival.getHours().toString().padStart(2, '0') + ':' + arrival.getMinutes().toString().padStart(2, '0');
+      els.routeDist.textContent = (delayMin > 0 ? `${km} км · +${delayMin} мин в пробках` : `${km} км`) + ` · прибытие ${arrivalStr}`;
       els.routebar.style.display = 'flex';
 
       // для сравнения — параллельно спрашиваем OSRM (другой источник данных, без TomTom),
@@ -441,13 +534,26 @@ function createNavController(viewKey, mapElId, els) {
   });
 
   // иконка манёвра по коду от TomTom — простые стрелки, без лишней графики
-  const MANEUVER_ICONS = {
-    TURN_LEFT: '⬅', SHARP_LEFT: '⬅', BEAR_LEFT: '↖', KEEP_LEFT: '↖',
-    TURN_RIGHT: '➡', SHARP_RIGHT: '➡', BEAR_RIGHT: '↗', KEEP_RIGHT: '↗',
-    STRAIGHT: '⬆', CONTINUE: '⬆',
-    ROUNDABOUT_LEFT: '🔄', ROUNDABOUT_RIGHT: '🔄', ROUNDABOUT_CROSS: '🔄',
-    ARRIVE: '🏁', ARRIVE_LEFT: '🏁', ARRIVE_RIGHT: '🏁',
+  // угол поворота большой SVG-стрелки по коду манёвра (0 = прямо, + вправо, − влево)
+  const MANEUVER_ANGLE = {
+    TURN_LEFT: -90, SHARP_LEFT: -135, BEAR_LEFT: -45, KEEP_LEFT: -25,
+    TURN_RIGHT: 90, SHARP_RIGHT: 135, BEAR_RIGHT: 45, KEEP_RIGHT: 25,
+    STRAIGHT: 0, CONTINUE: 0,
+    ACCESS_RAMP_LEFT: -45, ACCESS_RAMP_RIGHT: 45, EXIT_LEFT: -30, EXIT_RIGHT: 30,
+    TAKE_EXIT: 30, TAKE_RAMP: 30,
+    MAKE_UTURN: 180, SWAP_SIDE_UTURN: 180, UTURN: 180,
   };
+  // для кольца и финиша стрелка не подходит — оставляем символы
+  const MANEUVER_GLYPH = {
+    ROUNDABOUT_LEFT: '🔄', ROUNDABOUT_RIGHT: '🔄', ROUNDABOUT_CROSS: '🔄', ROUNDABOUT_BACK: '🔄',
+    ENTER_MOTORWAY: '⬆', ARRIVE: '🏁', ARRIVE_LEFT: '🏁', ARRIVE_RIGHT: '🏁',
+  };
+  const ARROW_SVG = '<svg viewBox="0 0 58 58" width="48" height="48"><path d="M29 6 L48 30 H36 V52 H22 V30 H10 Z" fill="currentColor"/></svg>';
+  function maneuverIconHtml(code) {
+    if (MANEUVER_GLYPH[code]) return `<span class="guidance-icon">${MANEUVER_GLYPH[code]}</span>`;
+    const angle = MANEUVER_ANGLE[code] ?? 0;
+    return `<span class="guidance-arrow" style="transform:rotate(${angle}deg)">${ARROW_SVG}</span>`;
+  }
   function formatDist(m) { return m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1)} км`; }
 
   // обновить полосу с подсказкой — какой манёвр следующий и сколько до него метров
@@ -466,22 +572,23 @@ function createNavController(viewKey, mapElId, els) {
     const next = state.instructions.find(instr => instr.routeOffsetInMeters >= distAlong);
     if (!next) { els.guidanceBar.style.display = 'none'; return; }
 
-    const icon = MANEUVER_ICONS[next.maneuver] || '⬆';
     const remain = Math.max(0, Math.round(next.routeOffsetInMeters - distAlong));
     els.guidanceBar.innerHTML =
-      `<span class="guidance-icon">${icon}</span>` +
+      maneuverIconHtml(next.maneuver) +
       `<div><div class="guidance-dist">${formatDist(remain)}</div><div class="guidance-text">${next.message || ''}</div></div>`;
   }
 
   // смена темы (день/ночь) — MapLibre при setStyle стирает все наши источники/слои,
   // поэтому после загрузки новой темы переигрываем трафик и маршрут заново
   state.currentStyleUrl = effectiveStyleUrl();
+  paintCar();
   function setTheme(url) {
     if (url === state.currentStyleUrl) return;
     state.currentStyleUrl = url;
+    paintCar();
     const hadTraffic = state.trafficOn;
     const routeGeojson = state.lastRouteGeojson;
-    map.setStyle(url);
+    map.setStyle(resolveStyle(url));
     map.once('style.load', () => {
       if (hadTraffic) {
         map.addSource('traffic-src', {
@@ -496,9 +603,11 @@ function createNavController(viewKey, mapElId, els) {
         map.addLayer({
           id: 'route-layer', type: 'line', source: 'route-src',
           layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': '#3ea6ff', 'line-width': 6, 'line-opacity': 0.9 }
+          paint: { 'line-color': accentColor(), 'line-width': 6, 'line-opacity': 0.9 }
         });
       }
+      // при смене темы подтягиваем и наклон камеры (в Vice он меньше)
+      if (state.followMode && map.getPitch() > 0) map.easeTo({ pitch: followPitch(), duration: 600 });
       applyPerf(); // новый стиль снова включает здания по умолчанию — применяем режим заново
     });
   }

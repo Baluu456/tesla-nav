@@ -121,6 +121,75 @@ const VICE_COLORS = {
   roadCase: '#0b0c22', road: '#7d83a8', roadMain: '#9ca2c6', motor: '#bcc1e4', service: '#565b7e',
   text: '#d4d8ff', halo: '#14153a', route: '#ff4fa3'
 };
+/* ---------- Значки POI для Vice: свои пиктограммы, рисуются кодом ----------
+   Цветной кружок + белый силуэт (SVG-путь в сетке 24×24). Картинки создаются
+   на лету (событие styleimagemissing), поэтому переживают смену темы. */
+const POI_ICONS = {
+  fuel:       { color: '#ff9f1c', classes: ['fuel'],
+                path: 'M6 4h8a1 1 0 0 1 1 1v15H5V5a1 1 0 0 1 1-1zM7 6h6v4H7z M16 8h2.2l2 2v6.5a1.5 1.5 0 0 1-3 0V11h-1.2z' },
+  ev:         { color: '#19c37d', classes: ['charging_station', 'ev_charging'],
+                path: 'M13 2L5 13h5l-1 9 8-12h-5z' },
+  burger:     { color: '#ff6b3d', classes: ['fast_food'],
+                path: 'M5 11a7 6 0 0 1 14 0z M4 12.5h16v2H4z M5 16h14v1.5a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z' },
+  restaurant: { color: '#ff8a3d', classes: ['restaurant', 'food_court'],
+                path: 'M7 3v7a2 2 0 0 0 2 2v9h2v-9a2 2 0 0 0 2-2V3h-1.5v5h-1V3H9v5H8V3z M17 3c-1.7 1-3 3.5-3 6.5V14h2.5v7H18V3z' },
+  cafe:       { color: '#c98a5b', classes: ['cafe', 'bakery', 'ice_cream'],
+                path: 'M5 8h11v6a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z M16 9h1.5a2.5 2.5 0 0 1 0 5H16v-1.6h1.5a.9.9 0 0 0 0-1.8H16z M4 20h13v1.5H4z' },
+  bank:       { color: '#3fae5e', classes: ['bank'],
+                path: 'M12 3L3 8v2h18V8z M5 11h2.5v7H5z M10.75 11h2.5v7h-2.5z M16.5 11H19v7h-2.5z M3 19h18v2H3z' },
+  atm:        { color: '#3fae5e', classes: ['atm'],
+                path: 'M3 6h18v12H3z M3 9.5h18V12H3z' },
+  hospital:   { color: '#ff4d6d', classes: ['hospital', 'clinic', 'doctors'],
+                path: 'M9 3h6v6h6v6h-6v6H9v-6H3V9h6z' },
+  pharmacy:   { color: '#2ecc71', classes: ['pharmacy', 'chemist'],
+                path: 'M9 3h6v6h6v6h-6v6H9v-6H3V9h6z' },
+  parking:    { color: '#5c6bc0', classes: ['parking'],
+                path: 'M8 4h5.5a4.5 4.5 0 0 1 0 9H11v7H8z M11 6.5v4h2.3a2 2 0 0 0 0-4z' },
+  shop:       { color: '#f0b429', classes: ['supermarket', 'convenience', 'grocery', 'mall', 'department_store', 'clothes', 'shop'],
+                path: 'M2 4h3.2l.8 3H21l-2.2 8.5H8.2L5 6.2H2z M8 19a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0z M15.5 19a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0z' },
+  hotel:      { color: '#b57edc', classes: ['hotel', 'hostel', 'motel', 'lodging', 'guest_house'],
+                path: 'M3 6h2v8h16v4h-2v-2H5v2H3z M7 9a2 2 0 1 0 4 0a2 2 0 1 0-4 0z M12 9h6a3 3 0 0 1 3 3v2H12z' },
+};
+function addViceIcon(map, key) {
+  const def = POI_ICONS[key];
+  if (!def || map.hasImage('vp-' + key)) return;
+  const S = 64, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const ctx = c.getContext('2d');
+  ctx.beginPath(); ctx.arc(S/2, S/2, S/2 - 3, 0, Math.PI * 2);
+  ctx.fillStyle = def.color; ctx.fill();
+  ctx.lineWidth = 3.5; ctx.strokeStyle = '#ffffff'; ctx.stroke();
+  ctx.save();
+  ctx.translate(S/2 - 18, S/2 - 18); ctx.scale(1.5, 1.5);   // 24×24 → 36×36 по центру
+  ctx.fillStyle = '#ffffff';
+  ctx.fill(new Path2D(def.path), 'evenodd');
+  ctx.restore();
+  map.addImage('vp-' + key, ctx.getImageData(0, 0, S, S), { pixelRatio: 2 });
+}
+
+function viceIconLayer() {
+  const sub = ['coalesce', ['get', 'subclass'], ''], cls = ['coalesce', ['get', 'class'], ''];
+  const inGroup = arr => ['any', ['in', sub, ['literal', arr]], ['in', cls, ['literal', arr]]];
+  const entries = Object.entries(POI_ICONS);
+  const iconExpr = ['case', ...entries.flatMap(([k, d]) => [inGroup(d.classes), 'vp-' + k]), ''];
+  const allClasses = entries.flatMap(([, d]) => d.classes);
+  return {
+    id: 'poi-icons', type: 'symbol', source: 'omt', 'source-layer': 'poi', minzoom: 14.5,
+    filter: inGroup(allClasses),
+    layout: {
+      'icon-image': iconExpr,
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 14.5, 0.55, 18, 0.9],
+      'icon-allow-overlap': false,
+      'symbol-sort-key': ['to-number', ['coalesce', ['get', 'rank'], 99]],
+      'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
+      'text-font': ['Noto Sans Regular'],
+      'text-size': ['step', ['zoom'], 0, 17, 11],   // подписи только на крупном зуме
+      'text-anchor': 'top', 'text-offset': [0, 1.0], 'text-optional': true, 'text-max-width': 8
+    },
+    paint: { 'text-color': VICE_COLORS.text, 'text-halo-color': VICE_COLORS.halo, 'text-halo-width': 1.5 }
+  };
+}
+
 function buildViceStyle() {
   const t = VICE_COLORS;
   const f = (...cls) => ['in', ['get', 'class'], ['literal', cls]];
@@ -180,6 +249,7 @@ function buildViceStyle() {
           'text-font': ['Noto Sans Regular'], 'text-size': 13
         },
         paint: { 'text-color': t.text, 'text-halo-color': t.halo, 'text-halo-width': 1.5 } },
+      viceIconLayer(),
       { id: 'place', type: 'symbol', source: 'omt', 'source-layer': 'place', maxzoom: 15,
         layout: {
           'text-field': ['coalesce', ['get', 'name:latin'], ['get', 'name']],
@@ -263,6 +333,9 @@ function createNavController(viewKey, mapElId, els) {
     maxPitch: 70,
     attributionControl: { compact: true }
   });
+
+  // значки POI темы Vice рисуются по требованию — MapLibre просит картинку, когда она нужна слою
+  map.on('styleimagemissing', e => { if (e.id.startsWith('vp-')) addViceIcon(map, e.id.slice(3)); });
 
   const state = { carMarker: null, followMode: true, hasRoute: false, trafficOn: false, map, heading: 0, lastFix: null, lastRouteGeojson: null };
 
